@@ -1,10 +1,12 @@
 #include <ntddk.h>
+#include <ntstrsafe.h>
 #include "ProcessLinkedList.h"
 
 DRIVER_INITIALIZE DriverEntry;
 
 DRIVER_UNLOAD RTDetectorUnload;
 DRIVER_DISPATCH RTDetectorCreateClose;
+NTSTATUS OnMessage;
 
 VOID ThreadCreateNotifyRoutine(
     _In_ HANDLE ProcessId,
@@ -17,15 +19,6 @@ VOID ProcessCreateNotifyRoutine(
     _In_ HANDLE ProcessId,
     _In_ BOOLEAN Create
 );
-
-// IOCTL code definition
-#define IOCTL_SEND_DATA CTL_CODE(FILE_DEVICE_UNKNOWN, 0x800, METHOD_BUFFERED, FILE_WRITE_DATA)
-
-// Structure for data communication
-typedef struct _DATA_TRANSFER {
-    HANDLE ProcessId; // You can add more data members as needed
-} DATA_TRANSFER, * PDATA_TRANSFER;
-
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING registry) {
     UNREFERENCED_PARAMETER(registry);
@@ -69,6 +62,7 @@ NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING regi
     }
 
     DriverObject->DriverUnload = RTDetectorUnload;
+    DriverObject->MajorFunction[IRP_MJ_DEVICE_CONTROL] = OnMessage;
     DriverObject->MajorFunction[IRP_MJ_CREATE] = DriverObject->MajorFunction[IRP_MJ_CLOSE] = RTDetectorCreateClose;
 
     InitializeProcessList();
@@ -84,51 +78,27 @@ NTSTATUS RTDetectorCreateClose(PDEVICE_OBJECT pob, PIRP Irp) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS SendIoctlToUserMode(PDATA_TRANSFER pData) {
-    UNICODE_STRING devName = RTL_CONSTANT_STRING(L"\\Device\\RTDetector");
-    PFILE_OBJECT pFileObject = NULL;
-    PDEVICE_OBJECT pDeviceObject = NULL;
+NTSTATUS OnMessage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
 
-    // Open the device object for communication
-    if (!NT_SUCCESS(IoGetDeviceObjectPointer(&devName, FILE_READ_DATA, &pFileObject, &pDeviceObject)))
-    {
-        return STATUS_UNSUCCESSFUL;
+    PCHAR welcome = "IOCTLKmUm - Hello from kernel!";
+    PVOID pBuf = Irp->AssociatedIrp.SystemBuffer;
+    PIO_STACK_LOCATION pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
+
+    if (pIoStackLocation->Parameters.DeviceIoControl.IoControlCode == 0x800) {
+        DbgPrint("IOCTLKmUm - Received: %s\n", pBuf);
+        RtlZeroMemory(pBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength);
+        RtlCopyMemory(pBuf, welcome, strlen(welcome));
+        Irp->IoStatus.Information = strlen(welcome);
+    }
+    else {
+        Irp->IoStatus.Information = 0;
     }
 
-    // Send IOCTL request to user-mode program
-    IO_STATUS_BLOCK ioStatus = { 0 };
-    KEVENT event;
-    PIRP irp;
-
-    KeInitializeEvent(&event, NotificationEvent, FALSE);
-
-    irp = IoBuildDeviceIoControlRequest(IOCTL_SEND_DATA,
-        pDeviceObject,
-        pData,
-        sizeof(DATA_TRANSFER),
-        NULL,
-        0,
-        FALSE,
-        &event,
-        &ioStatus);
-
-    if (irp == NULL)
-    {
-        ObDereferenceObject(pFileObject);
-        return STATUS_INSUFFICIENT_RESOURCES;
-    }
-
-    NTSTATUS status = IoCallDriver(pDeviceObject, irp);
-
-    if (status == STATUS_PENDING)
-    {
-        KeWaitForSingleObject(&event, Executive, KernelMode, FALSE, NULL);
-    }
-
-    // Clean up
-    ObDereferenceObject(pFileObject);
-
-    return status;
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
 }
 
 VOID ThreadCreateNotifyRoutine(
@@ -155,24 +125,6 @@ VOID ThreadCreateNotifyRoutine(
             {
                 KdPrint(("Remote thread has been created!\n"));
 
-                // Communicate with user-mode program
-                PDATA_TRANSFER pData = (PDATA_TRANSFER)ExAllocatePool2(NonPagedPool, sizeof(DATA_TRANSFER), 0);
-
-                if (pData != NULL)
-                {
-                    RtlZeroMemory(pData, sizeof(DATA_TRANSFER));
-                    pData->ProcessId = hostPid;
-
-                    NTSTATUS status = SendIoctlToUserMode(pData);
-
-                    if (!NT_SUCCESS(status))
-                    {
-                        // Handle error
-                        KdPrint(("Failed to communicate with user-mode program! Status: 0x%X\n", status));
-                    }
-
-                    ExFreePool(pData);
-                }
             }
         }
     }
