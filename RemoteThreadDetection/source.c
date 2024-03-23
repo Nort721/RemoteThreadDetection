@@ -6,7 +6,8 @@ DRIVER_INITIALIZE DriverEntry;
 
 DRIVER_UNLOAD RTDetectorUnload;
 DRIVER_DISPATCH RTDetectorCreateClose;
-NTSTATUS OnMessage;
+
+HANDLE g_RemoteThreadId = NULL;
 
 VOID ThreadCreateNotifyRoutine(
     _In_ HANDLE ProcessId,
@@ -19,6 +20,61 @@ VOID ProcessCreateNotifyRoutine(
     _In_ HANDLE ProcessId,
     _In_ BOOLEAN Create
 );
+
+//NTSTATUS OnMessage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+//{
+//    UNREFERENCED_PARAMETER(DeviceObject);
+//
+//    PCHAR welcome = "IOCTLKmUm - Hello from kernel!";
+//    PVOID pBuf = Irp->AssociatedIrp.SystemBuffer;
+//    PIO_STACK_LOCATION pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
+//
+//    if (pIoStackLocation->Parameters.DeviceIoControl.IoControlCode == 0x800) {
+//        DbgPrint("IOCTLKmUm - Received: %s\n", pBuf);
+//        RtlZeroMemory(pBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength);
+//        RtlCopyMemory(pBuf, welcome, strlen(welcome));
+//        Irp->IoStatus.Information = strlen(welcome);
+//    }
+//    else {
+//        Irp->IoStatus.Information = 0;
+//    }
+//
+//    Irp->IoStatus.Status = STATUS_SUCCESS;
+//    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+//    return STATUS_SUCCESS;
+//}
+
+NTSTATUS OnMessage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
+{
+    UNREFERENCED_PARAMETER(DeviceObject);
+
+    PVOID pBuf = Irp->AssociatedIrp.SystemBuffer;
+    PIO_STACK_LOCATION pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
+
+    if (pIoStackLocation->Parameters.DeviceIoControl.IoControlCode == 0x800) {
+        // Check if a remote thread has been created
+        if (g_RemoteThreadId != NULL) {
+            // Copy the ProcessId of the remote thread to the user-mode buffer
+            RtlZeroMemory(pBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength);
+            RtlCopyMemory(pBuf, &g_RemoteThreadId, sizeof(HANDLE));
+            Irp->IoStatus.Information = sizeof(HANDLE);
+            // Reset the global variable
+            g_RemoteThreadId = NULL;
+            DbgPrint("IOCTLKmUm - ProcessId of remote thread sent to user-mode program\n");
+        }
+        else {
+            DbgPrint("IOCTLKmUm - No remote thread created yet\n");
+            Irp->IoStatus.Information = 0;
+        }
+    }
+    else {
+        Irp->IoStatus.Information = 0;
+    }
+
+    Irp->IoStatus.Status = STATUS_SUCCESS;
+    IoCompleteRequest(Irp, IO_NO_INCREMENT);
+    return STATUS_SUCCESS;
+}
 
 NTSTATUS DriverEntry(_In_ PDRIVER_OBJECT DriverObject, _In_ PUNICODE_STRING registry) {
     UNREFERENCED_PARAMETER(registry);
@@ -78,29 +134,6 @@ NTSTATUS RTDetectorCreateClose(PDEVICE_OBJECT pob, PIRP Irp) {
     return STATUS_SUCCESS;
 }
 
-NTSTATUS OnMessage(PDEVICE_OBJECT DeviceObject, PIRP Irp)
-{
-    UNREFERENCED_PARAMETER(DeviceObject);
-
-    PCHAR welcome = "IOCTLKmUm - Hello from kernel!";
-    PVOID pBuf = Irp->AssociatedIrp.SystemBuffer;
-    PIO_STACK_LOCATION pIoStackLocation = IoGetCurrentIrpStackLocation(Irp);
-
-    if (pIoStackLocation->Parameters.DeviceIoControl.IoControlCode == 0x800) {
-        DbgPrint("IOCTLKmUm - Received: %s\n", pBuf);
-        RtlZeroMemory(pBuf, pIoStackLocation->Parameters.DeviceIoControl.InputBufferLength);
-        RtlCopyMemory(pBuf, welcome, strlen(welcome));
-        Irp->IoStatus.Information = strlen(welcome);
-    }
-    else {
-        Irp->IoStatus.Information = 0;
-    }
-
-    Irp->IoStatus.Status = STATUS_SUCCESS;
-    IoCompleteRequest(Irp, IO_NO_INCREMENT);
-    return STATUS_SUCCESS;
-}
-
 VOID ThreadCreateNotifyRoutine(
     _In_ HANDLE ProcessId,
     _In_ HANDLE ThreadId,
@@ -123,8 +156,8 @@ VOID ThreadCreateNotifyRoutine(
             // Comparing the host id with the creator id
             if (hostPid != ProcessId)
             {
+                g_RemoteThreadId = ProcessId;
                 KdPrint(("Remote thread has been created!\n"));
-
             }
         }
     }
